@@ -176,25 +176,24 @@ export default function AdminPage() {
 
         <label className="flex flex-col gap-1 text-sm">
           Language
-          <select
+          <input
+            list="language-options"
             value={languageCode}
-            onChange={(e) => setLanguageCode(e.target.value)}
+            onChange={(e) => setLanguageCode(e.target.value.trim())}
+            placeholder="en, pcm, yo, ig, ha…"
+            required
             className="rounded-lg border border-slate-300 px-3 py-2"
-          >
-            {languages.length > 0
-              ? languages.map((l) => (
-                  <option key={l.code} value={l.code}>
-                    {l.name}
-                  </option>
-                ))
-              : ["en", "pcm", "ig", "yo", "ha"].map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-          </select>
+          />
+          <datalist id="language-options">
+            {(languages.length > 0
+              ? languages.map((l) => l.code)
+              : ["en", "pcm"]
+            ).map((code) => (
+              <option key={code} value={code} />
+            ))}
+          </datalist>
           <span className="text-xs text-slate-400">
-            Not in the list? Type any language code (e.g. &quot;ig&quot;, &quot;yo&quot;, &quot;ha&quot;) — new
+            Pick an existing one, or type a new code (e.g. &quot;ig&quot;, &quot;yo&quot;, &quot;ha&quot;) — new
             languages don&apos;t need a code change, just a row.
           </span>
         </label>

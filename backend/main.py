@@ -4,7 +4,7 @@ from typing import Optional
 
 import psycopg
 from psycopg.rows import dict_row
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from groq import Groq
@@ -12,7 +12,8 @@ from groq import Groq
 DATABASE_URL = os.environ["DATABASE_URL"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "*")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+ADMIN_KEY = os.environ.get("ADMIN_KEY")
 
 app = FastAPI(title="Kokoodi Health Information Companion API")
 app.add_middleware(
@@ -88,6 +89,90 @@ def get_article(slug: str, lang: str = "en"):
 
 
 # ---------------------------------------------------------------------------
+# Admin: add a new article, or a new translation on an existing one, without
+# touching the database by hand. This is the optional bonus from the brief —
+# note it needed zero schema changes, because articles/translations were
+# already normalized that way from the start.
+# ---------------------------------------------------------------------------
+
+def require_admin(x_admin_key: Optional[str] = Header(default=None)):
+    if not ADMIN_KEY or x_admin_key != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing admin key")
+
+
+def slugify(text: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return text
+
+
+class NewArticle(BaseModel):
+    topic_slug: str
+    author: Optional[str] = None
+    last_updated: Optional[str] = None  # ISO date string, e.g. "2026-08-21"
+    language_code: str = "en"
+    title: str = Field(..., min_length=1, max_length=200)
+    summary: Optional[str] = None
+    body: str = Field(..., min_length=1)
+
+
+class NewTranslation(BaseModel):
+    language_code: str
+    title: str = Field(..., min_length=1, max_length=200)
+    summary: Optional[str] = None
+    body: str = Field(..., min_length=1)
+
+
+@app.post("/api/admin/articles")
+def create_article(article: NewArticle, x_admin_key: Optional[str] = Header(default=None)):
+    require_admin(x_admin_key)
+    slug = f"{slugify(article.title)}"
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("select id from topics where slug = %s", (article.topic_slug,))
+        topic = cur.fetchone()
+        if not topic:
+            raise HTTPException(status_code=400, detail=f"Unknown topic_slug: {article.topic_slug}")
+
+        # de-duplicate the slug if it already exists (e.g. two articles with similar titles)
+        cur.execute("select 1 from articles where slug = %s", (slug,))
+        if cur.fetchone():
+            slug = f"{slug}-{os.urandom(2).hex()}"
+
+        cur.execute(
+            """insert into articles (topic_id, slug, status, author, last_updated)
+               values (%s, %s, 'published', %s, %s) returning id""",
+            (topic["id"], slug, article.author, article.last_updated),
+        )
+        article_id = cur.fetchone()["id"]
+
+        cur.execute(
+            """insert into article_translations (article_id, language_code, title, summary, body)
+               values (%s, %s, %s, %s, %s)""",
+            (article_id, article.language_code, article.title, article.summary, article.body),
+        )
+        conn.commit()
+    return {"id": article_id, "slug": slug}
+
+
+@app.post("/api/admin/articles/{article_id}/translations")
+def add_translation(article_id: int, translation: NewTranslation, x_admin_key: Optional[str] = Header(default=None)):
+    require_admin(x_admin_key)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("select id from articles where id = %s", (article_id,))
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Article not found")
+
+        cur.execute(
+            """insert into article_translations (article_id, language_code, title, summary, body)
+               values (%s, %s, %s, %s, %s)
+               on conflict (article_id, language_code)
+               do update set title = excluded.title, summary = excluded.summary, body = excluded.body""",
+            (article_id, translation.language_code, translation.title, translation.summary, translation.body),
+        )
+        conn.commit()
+    return {"article_id": article_id, "language_code": translation.language_code}
+
+
+# ---------------------------------------------------------------------------
 # AI feature: ask-a-health-question, grounded only in the published English
 # content. The corpus is ~18 short articles — small enough to pass in full as
 # context rather than standing up embeddings/a vector store for this scale.
@@ -129,6 +214,7 @@ def build_context() -> str:
         )
         rows = cur.fetchall()
     return "\n\n".join(f"[{r['topic']}] {r['title']}: {r['body']}" for r in rows)
+
 
 def strip_markdown(text: str) -> str:
     """Safety net in case the model uses markdown despite being told not to."""

@@ -130,14 +130,15 @@ def build_context() -> str:
         rows = cur.fetchall()
     return "\n\n".join(f"[{r['topic']}] {r['title']}: {r['body']}" for r in rows)
 
-
-@app.post("/api/ask")
 def strip_markdown(text: str) -> str:
     """Safety net in case the model uses markdown despite being told not to."""
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)   # **bold** -> bold
     text = re.sub(r"(?m)^\s*\*\s+", "- ", text)     # "* item" -> "- item"
     text = text.replace("*", "")                    # any remaining stray asterisks
     return text.strip()
+
+
+@app.post("/api/ask")
 def ask_question(req: AskRequest):
     context = build_context()
     completion = groq_client.chat.completions.create(
